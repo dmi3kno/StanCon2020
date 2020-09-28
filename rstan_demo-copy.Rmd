@@ -1,0 +1,220 @@
+---
+title: "Bayesian data analysis - RStan demos with QPDs"
+author: "Dmytro Perepolkin"
+date: "First version 2020-09-27. Last modified `r format(Sys.Date())`."
+output:
+  html_document:
+    fig_caption: yes
+    toc: TRUE
+    toc_depth: 2
+    number_sections: TRUE
+    toc_float:
+      smooth_scroll: FALSE
+    theme: readable
+    code_download: true
+---
+
+# Setup  {.unnumbered}
+
+```{r knitr_setup, include=FALSE}
+knitr::opts_chunk$set(cache=FALSE, message=FALSE, 
+                      error=FALSE, warning=TRUE, 
+                      comment=NA, out.width='95%')
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+**Load packages**
+```{r setup}
+library(rstan) 
+rstan_options(auto_write = TRUE)
+options(mc.cores = ceiling(parallel::detectCores()/2))
+
+library(bayesplot)
+theme_set(bayesplot::theme_default(base_family = "sans"))
+SEED <- 42 # set random seed for reproducability
+```
+
+# Introduction
+
+This notebook takes from BDA [`rstan` examples by Aki Vehtari and Markus Paasiniemi](http://avehtari.github.io/BDA_R_demos/demos_rstan/rstan_demo.html) with modified [Stan](https://mc-stan.org) code to use Quantile-Parametrized Distributions (QPDs). 
+
+# Bernoulli model
+
+Toy data with sequence of failures (0) and successes (1). We would like to learn about the unknown probability of success.
+```{r}
+data_bern <- list(N = 10, 
+                  y = c(1, 1, 1, 0, 1, 1, 1, 0, 1, 0))
+```
+
+Original example provided Bernoulli model with a proper Beta(1,1) (uniform) prior. Since only metalog distribution is flexible enough provide something resembling the uniform distriubition, we will draw samples from fairly flat *bounded* distribution using Myerson and, then, Johnson QPDs.
+
+```{stan bern_mod1, output.var="bern_mod1", cache=TRUE}
+#include /quantile_functions.stan
+// Bernoulli model with JQPDB_icdf
+data {
+  int<lower=0> N;              // number of observations
+  int<lower=0,upper=1> y[N];   // vector of binary observations
+  real<lower = 0, upper = 0.5> alpha;   // low is the alpha quantile
+  real<lower=0, upper=1> low; // probability of success
+  real<lower=low, upper=1> median;
+  real<lower=median, upper=1> high;
+}
+
+parameters {
+  real<lower = 0, upper = 1> p; // primitive with implicit uniform prior
+}
+
+transformed parameters {
+  real theta = JQPDB_icdf(p, [0.0, 1.0], alpha, [low, median, high]'); // prior
+}
+
+model {
+  // model block creates the log density to be sampled
+  // theta ~ beta(1, 1);          // prior 
+  y ~ bernoulli(theta);        // observation model / likelihood
+}
+```
+
+Sample form the posterior and show the summary
+```{r, results='hide'}
+data_par_bern <- c(data_bern, list(alpha=0.1, low=0.1, median=0.55, high=0.9))
+bern_fit <- sampling(bern_mod1, data=data_par_bern, iter=1000, chains=4, seed=SEED) 
+bern_fit
+```
+
+Plot the histogram of the posterior draws
+```{r}
+draws <- as.data.frame(bern_fit)
+bayesplot::mcmc_hist(draws, pars='theta')
+# or with base R
+# hist(draws[,'theta'])
+```
+
+# Binomial model
+
+Instead of sequence of 0's and 1's, we can summarize the data with the number of experiments and the number successes:
+```{r}
+data_bin <- list(N = 10, y = 7)
+```
+
+And then we use Binomial model with Beta(1,1) prior for the probability of success.
+
+```{stan binom_mod1, output.var="binom_mod1", cache=TRUE}
+#include /quantile_functions.stan
+// Binomial model with Myerson prior
+data {
+  int<lower=0> N;              // number of experiments
+  int<lower=0> y;              // number of successes
+  real<lower = 0, upper = 0.5> alpha;   // low is the alpha quantile
+  real<lower=0, upper=1> low; // probability of success
+  real<lower=low, upper=1> median;
+  real<lower=median, upper=1> high;
+}
+
+parameters {
+  real<lower = 0, upper = 1> p; // primitive with implicit uniform prior
+}
+
+transformed parameters {
+  real theta = Myerson_icdf(p, [0.0, 1.0], alpha, [low, median, high]'); // prior
+}
+model {
+  // model block creates the log density to be sampled
+  //theta ~ beta(1, 1);          // prior
+  y ~ binomial(N, theta);      // observation model / likelihood
+}
+```
+
+Sample from the posterior and plot the posterior. The histogram should look similar as in the Bernoulli case.
+
+```{r}
+data_par_bin <- c(data_bin, list(alpha=0.1, low=0.1, median=0.55, high=0.9))
+binom_fit <- sampling(binom_mod1, data=data_par_bin, iter=1000, chains=4, seed=SEED) 
+binom_fit
+```
+
+
+```{r}
+draws <- as.data.frame(binom_fit)
+bayesplot::mcmc_hist(draws, pars = 'theta')
+```
+
+Re-run the model with a new data. The compiled Stan program is re-used making the re-use faster.
+
+```{r, results='hide'}
+data_bin <- list(N = 100, y = 70)
+data_par_bin <- c(data_bin, list(alpha=0.1, low=0.1, median=0.55, high=0.9))
+binom_fit <- sampling(binom_mod1, data=data_par_bin, iter=2000, chains=4, seed=SEED) 
+draws <- as.data.frame(binom_fit)
+bayesplot::mcmc_hist(draws, pars = 'theta')
+```
+
+# Comparison of two groups with Binomial
+
+An experiment was performed to estimate the effect of beta-blockers on mortality of cardiac patients. A group of patients were randomly assigned to treatment and control groups:
+
+- out of 674 patients receiving the control, 39 died
+- out of 680 receiving the treatment, 22 died
+
+Data:
+
+```{r}
+data_bin2 <- list(N1 = 674, y1 = 39, N2 = 680, y2 = 22)
+```
+
+To analyse whether the treatment is useful, we can use Binomial model for both groups and compute odds-ratio:
+```{stan bin2_mod, output.var="bin2_mod", cache=TRUE}
+#include /quantile_functions.stan
+//  Comparison of two groups with Binomial and Metalog priors
+data {
+  int<lower=0> N1;              // number of experiments in group 1
+  int<lower=0> y1;              // number of deaths in group 1
+  int<lower=0> N2;              // number of experiments in group 2
+  int<lower=0> y2;              // number of deaths in group 2
+  real<lower = 0, upper = 0.5> alpha1;   // low1 is the alpha quantile for group 1
+  real<lower = 0, upper = 0.5> alpha2;   // low2 is the alpha quantile for group 2
+  vector[3] quantiles1; // three quantiles for group1
+  vector[3] quantiles2; // three quantiles for group2
+}
+parameters {
+//  real<lower=0,upper=1> theta1; // probability of death in group 1
+//  real<lower=0,upper=1> theta2; // probability of death in group 2
+  real<lower = 0, upper = 1> p1; // primitive with implicit uniform prior
+  real<lower = 0, upper = 1> p2; // primitive with implicit uniform prior
+}
+
+transformed parameters {
+  real theta1 = metalogSPTB_icdf(p1, [0.0, 1.0], alpha1, quantiles1); // prior
+  real theta2 = metalogSPTB_icdf(p2, [0.0, 1.0], alpha2, quantiles2); // prior
+}
+model {
+  // model block creates the log density to be sampled
+  //theta1 ~ beta(1, 1);          // prior
+  //theta2 ~ beta(1, 1);          // prior
+  y1 ~ binomial(N1, theta1);    // observation model / likelihood
+  y2 ~ binomial(N2, theta2);    // observation model / likelihood
+}
+generated quantities {
+  // generated quantities are computed after sampling
+  real oddsratio = (theta2/(1-theta2))/(theta1/(1-theta1));
+}
+```
+
+Sample from the posterior and plot the posterior
+```{r, results='hide'}
+data_par_bin <- c(data_bin2, list(alpha1=0.1, alpha2=0.1,
+                                 quantiles1=c(0.1, 0.55, 0.9),
+                                 quantiles2=c(0.1, 0.55, 0.9)))
+
+fit_bin2 <- sampling(bin2_mod, data=data_par_bin, iter=2000, chains=4, seed=SEED) 
+
+draws <- as.data.frame(fit_bin2)
+bayesplot::mcmc_hist(draws, pars = 'oddsratio') +
+  geom_vline(xintercept = 1) +
+  scale_x_continuous(breaks = c(seq(0.25,1.5,by=0.25)))
+```
+
+# Licenses {.unnumbered}
+* Code &copy; 2020, Dmytro Perepolkin, 2018-2020 Bob Goodrich licensed under BSD-3.
+* Code &copy; 2017-2020, Aki Vehtari, 2017 Markus Paasiniemi, licensed under BSD-3.
+* Text &copy; 2017-2020, Aki Vehtari, licensed under CC-BY-NC 4.0.

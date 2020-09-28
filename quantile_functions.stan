@@ -7,9 +7,9 @@ functions {
      @return 1 if real numbers are finite and ordered
    */
   int in_order(real[] theta) {
-    if (num_elements(theta) != 5) reject("wrong number of elements");
+   // if (num_elements(theta) != 5) reject("wrong number of elements");
     if (theta[1] == negative_infinity()) reject("first element must be finite");
-    for (k in 2:5) if (theta[k] <= theta[k - 1]) 
+    for (k in 2:size(theta)) if (theta[k] <= theta[k - 1]) 
       reject("bounds and quantiles are not in the right order");
     return 1;
   }
@@ -200,6 +200,71 @@ functions {
     return JQPDB_icdf(uniform_rng(0, 1), bounds, alpha, quantiles);
   }
   
+  /*quantile parametrized Generalized Lognormal(Myerson) distribution*/
+  real Myerson_icdf(real p, row_vector bounds, data real alpha, vector quantiles) {
+    if (cols(bounds) != 2)      reject("bounds must have two elements");
+    if (p < 0 || p > 1)         reject("p must be between 0 and 1");
+    if (alpha < 0 || alpha >= 1) reject("tail probability percentage must be between 0 and 1");
+    if (rows(quantiles) != 3)   reject("quantiles must have three elements");
+    if (in_order({bounds[1], quantiles[1], quantiles[2], quantiles[3], bounds[2]})) {
+      real norml = inv_Phi(p)/inv_Phi(1-alpha);
+      real q3mq2 = quantiles[3]-quantiles[2];
+      real q2mq1 = quantiles[2]-quantiles[1];
+      real br = q3mq2 / q2mq1;
+      real res;
+      if (br==1){
+        return fmin(fmax(quantiles[2]+q3mq2*norml, bounds[1]), bounds[2]);
+      }
+      res = quantiles[2] + q3mq2 * (br^norml-1)/(br-1);
+      return fmin(fmax(res, bounds[1]), bounds[2]);
+    }
+    return not_a_number();
+  }
+  
+    /*
+     Pseudo-random number generator of the Generalized Lognormal (Myerson) distribution
+     
+     @param tl fixed proportion of distribution below quantiles[1] and above quantiles[3]
+     @param bounds vector of size two containing the lower and upper bounds
+     @param quantiles vector of size three ordered quantiles
+     @return real number between the two elements of bounds
+   */
+  real Myerson_rng(data row_vector bounds, real alpha, vector quantiles) {
+    return Myerson_icdf(uniform_rng(0, 1), bounds, alpha, quantiles);
+  }
+  
+  /*
+  Generalized Normal distribution with skew parameter.
+
+  @param n number of observations. If `length(n)>1``, the length is taken to be the number required.
+  @param q1 minimum value
+  @param q3 maximum value
+  @param s skew parameter betweem -1 and 1. When skew parameter equal 0, distribution is normal.
+  @param lower lower bound for distribution
+  @param upper upper bound for distribution
+
+  @return a length `n` vector of random values.
+   */
+
+  real SkewNorm_icdf(real p, row_vector bounds, data real s, vector quantiles) {
+    if (cols(bounds) != 2)      reject("bounds must have two elements");
+    if (p < 0 || p > 1)         reject("p must be between 0 and 1");
+    if (s < -1 || s > 1) reject("tail probability percentage must be between 0 and 1");
+    if (rows(quantiles) != 2)   reject("quantiles must have two elements");
+    if (in_order({bounds[1], quantiles[1], quantiles[2], bounds[2]})) {
+      real q3mq1 = quantiles[2] - quantiles[1];
+      real m_quantile = quantiles[1] + (s+1) * q3mq1 / 2;
+      vector[3] quantiles3;
+      quantiles3 =[quantiles[1], m_quantile, quantiles[2]]';
+      return Myerson_icdf(p, bounds, Phi(-3), quantiles3);
+      }
+    return not_a_number();
+  }
+  
+  real SkewNorm_rng(data row_vector bounds, real s, vector quantiles){
+    return SkewNorm_icdf(uniform_rng(0, 1), bounds, s, quantiles);
+  }
+  
   /* Quantile Parameteried Normal (qnormal) distribution */
   
   /*
@@ -255,14 +320,15 @@ functions {
   
   /* Inverse CDF of the three term metalog distribution
   
-     See equations 18, 19, and 20 of 
+     See equations 6, 18, 19, and 20 of 
      http://www.metalogdistributions.com/images/TheMetalogDistributions.pdf
     
      @param p real cumulative probability
      @param alpha fixed proportion of distribution below quantiles[1]
      @param quantiles vector of size three ordered quantiles
    */  
-  real metalog3_icdf(real p, data real alpha, data vector quantiles) {
+  real metalogSPTU_icdf(real p, data real alpha, data vector quantiles) {
+    real a1 = quantiles[2];
     real out_diff = quantiles[3] - quantiles[1];
     real log_odds_alpha = logit(alpha); 
     real a2 = 0.5 / log_odds_alpha * out_diff;
@@ -277,6 +343,38 @@ functions {
     if (k >= r || r >= (1 - k)) 
       reject("quantiles do not imply a valid distribution");
     return quantiles[2] + (a2 + a3 * (p - 0.5)) * logit(p);
+  }
+  
+  real metalogSPTB_icdf(real p, row_vector bounds, data real alpha, vector quantiles) {
+    real q1_m_bl = quantiles[1] - bounds[1]; 
+    real bu_m_q1 = bounds[2] - quantiles[1];
+    real q2_m_bl = quantiles[2] - bounds[1]; 
+    real bu_m_q2 = bounds[2] - quantiles[2];
+    real q3_m_bl = quantiles[3] - bounds[1]; 
+    real bu_m_q3 = bounds[2] - quantiles[3];
+    real ypsilon1 = q1_m_bl / bu_m_q1;
+    real ypsilon2 = q2_m_bl / bu_m_q2;
+    real ypsilon3 = q3_m_bl / bu_m_q3;
+    real a1 = log(ypsilon2);
+//    real out_diff = quantiles[3] - quantiles[1];
+    real log_odds_alpha = logit(alpha); 
+    real a2 = 0.5 / log_odds_alpha * log(ypsilon3/ypsilon1);
+ //   real in_diff = quantiles[2] - quantiles[1];
+    real a3 = log(ypsilon3 * ypsilon1 / ypsilon2^2) / ((1 - 2 * alpha) * log_odds_alpha);
+    real k = 0.5 * (1 - 1.66711 * (0.5 - alpha));
+    real lb1 = bounds[1]+bounds[2]*ypsilon1^(1-k)*ypsilon3^k;
+    real lb2 = 1+ypsilon1^(1-k)*ypsilon3^k;
+    real ub1 = bounds[1]+bounds[2]*ypsilon1^k*ypsilon3^(1-k);
+    real ub2 = 1+ypsilon1^k*ypsilon3^(1-k);
+    if (bounds[1]>=bounds[2]) reject("bounds should be ordered from lower to higher");
+    if(bounds[1]>=quantiles[1]) reject("lower bound should be below the quantiles[1]");
+    if(quantiles[3]>=bounds[2]) reject("upper bound should be above the quantiles[2]");
+    if (alpha >= 0.5) reject("alpha must be less than 0.5");
+    if (quantiles[1] >= quantiles[2]) reject("quantiles[2] must be greater than quantiles[1]");
+    if (quantiles[2] >= quantiles[3]) reject("quantiles[3] must greater than quantiles[2]");
+    // feasibility condition
+    if (lb1/lb2 >= quantiles[2] || quantiles[2]>= ub1/ub2) reject("quantiles do not imply a valid distribution");
+    return a1 + (a2 + a3 * (p - 0.5)) * logit(p);
   }
   
   vector metalog_coefficients(data vector p, data vector quantiles) {
